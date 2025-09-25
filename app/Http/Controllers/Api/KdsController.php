@@ -9,26 +9,35 @@ use Illuminate\Support\Facades\DB;
 class KdsController extends Controller
 {
     public function queue(Request $req)
-    {
-        $req->validate([
-            'route_id' => 'nullable|integer',
-            'status'   => 'nullable|in:sent,prepared'
-        ]);
-        $status = $req->get('status','sent');
+{
+    $req->validate([
+        'route_id' => 'nullable|integer',
+        'status'   => 'nullable|in:sent,prepared'
+    ]);
+    $status = $req->get('status','sent');
 
-        $q = OrderItem::query()
-            ->select([
-                'id','order_id','name_snapshot as name','quantity','status',
-                'sent_at','prepared_at','route_id_snapshot as route_id'
-            ])
-            ->whereNull('served_at')
-            ->whereIn('status', ['sent','prepared']);
+    $q = \App\Models\OrderItem::query()
+        ->join('orders','orders.id','=','order_items.order_id')
+        ->select([
+            'order_items.id',
+            'order_items.order_id',
+            'orders.anchor as anchor',
+            'order_items.name_snapshot as name',
+            'order_items.quantity',
+            'order_items.status',
+            'order_items.sent_at',
+            'order_items.prepared_at',
+            'order_items.route_id_snapshot as route_id',
+        ])
+        ->whereNull('order_items.served_at')
+        ->whereIn('order_items.status', ['sent','prepared']);
 
-        if ($rid = $req->integer('route_id')) $q->where('route_id_snapshot',$rid);
-        $q->where('status',$status)->orderBy($status==='prepared'?'prepared_at':'sent_at');
+    if ($rid = $req->integer('route_id')) $q->where('order_items.route_id_snapshot',$rid);
+    $q->where('order_items.status',$status)
+      ->orderBy($status==='prepared' ? 'order_items.prepared_at' : 'order_items.sent_at');
 
-        return response()->json(['data'=>$q->get()]);
-    }
+    return response()->json(['data'=>$q->get()]);
+}
 
     public function markPrepared(Request $req, OrderItem $item)
     {
