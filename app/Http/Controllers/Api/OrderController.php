@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
@@ -15,10 +16,13 @@ class OrderController extends Controller
         $data = $req->validate([
             'anchor' => 'nullable|string|max:50',
         ]);
-        $o = Order::create($data + ['status'=>'open']);
+        $o = Order::create($data + ['status' => 'open']);
         DB::table('order_logs')->insert([
-            'order_id'=>$o->id,'user_id'=>optional($req->user())->id,
-            'action'=>'created','context'=>json_encode($data),'created_at'=>now('UTC'),
+            'order_id' => $o->id,
+            'user_id' => optional($req->user())->id,
+            'action' => 'created',
+            'context' => json_encode($data),
+            'created_at' => now('UTC'),
         ]);
         return response()->json($o, 201);
     }
@@ -27,48 +31,78 @@ class OrderController extends Controller
     {
         $data = $req->validate([
             'product_id' => 'required|integer|exists:products,id',
-            'quantity'   => 'nullable|numeric|min:0.001|max:999999',
+            'quantity'   => 'nullable|numeric|min:1|max:99',
         ]);
 
-        $p = Product::findOrFail($data['product_id']);
-        $qty = (float)($data['quantity'] ?? 1);
+        $p   = Product::findOrFail($data['product_id']);
+        $qty = (int) ($data['quantity'] ?? 1);
+        if ($qty < 1) {
+            return response()->json(['message' => 'Quantity must be >= 1'], 422);
+        }
 
-        $item = OrderItem::create([
-            'order_id'        => $order->id,
-            'product_id'      => $p->id,
-            'name_snapshot'   => $p->name,
-            'price_snapshot'  => $p->price,
-            'quantity'        => $qty,
-            'status'          => 'draft',
-            'route_id_snapshot'=> $p->category?->printer_route_id, // pode ser null
-        ]);
+        return DB::transaction(function () use ($req, $order, $p, $qty) {
+            // Consolida "draft" mesmo produto + mesmo preço
+            $existing = OrderItem::where('order_id', $order->id)
+                ->where('product_id', $p->id)
+                ->where('status', 'draft')
+                ->where('price_snapshot', $p->price)
+                ->lockForUpdate()
+                ->first();
 
-        DB::table('order_logs')->insert([
-            'order_id'=>$order->id,'user_id'=>optional($req->user())->id,
-            'action'=>'item_added',
-            'context'=>json_encode(['item_id'=>$item->id,'product_id'=>$p->id,'qty'=>$qty]),
-            'created_at'=>now('UTC'),
-        ]);
+            if ($existing) {
+                // incremento atômico
+                $existing->update([
+                    'quantity' => DB::raw('quantity + ' . $qty),
+                ]);
+                $item = $existing->fresh();
+            } else {
+                $item = OrderItem::create([
+                    'order_id'         => $order->id,
+                    'product_id'       => $p->id,
+                    'name_snapshot'    => $p->name,
+                    'price_snapshot'   => $p->price,
+                    'quantity'         => $qty,
+                    'status'           => 'draft',
+                    'route_id_snapshot' => $p->category?->printer_route_id,
+                ]);
+            }
 
-        $this->recalc($order->id);
-        return response()->json($item->fresh(), 201);
+            DB::table('order_logs')->insert([
+                'order_id'  => $order->id,
+                'user_id'   => optional($req->user())->id,
+                'action'    => 'item_added',
+                'context'   => json_encode([
+                    'item_id'    => $item->id,
+                    'product_id' => $p->id,
+                    'qty'        => $qty,
+                ]),
+                'created_at' => now('UTC'),
+            ]);
+
+            $this->recalc($order->id);
+
+            return response()->json($item, $existing ? 200 : 201);
+        });
     }
+
 
     public function send(Request $req, Order $order)
     {
-        $affected = OrderItem::where('order_id',$order->id)
-            ->where('status','draft')
-            ->update(['status'=>'sent','sent_at'=>now('UTC')]);
+        $affected = OrderItem::where('order_id', $order->id)
+            ->where('status', 'draft')
+            ->update(['status' => 'sent', 'sent_at' => now('UTC')]);
 
-        if ($affected>0) {
+        if ($affected > 0) {
             DB::table('order_logs')->insert([
-                'order_id'=>$order->id,'user_id'=>optional($req->user())->id,
-                'action'=>'sent','context'=>json_encode(['count'=>$affected]),
-                'created_at'=>now('UTC'),
+                'order_id' => $order->id,
+                'user_id' => optional($req->user())->id,
+                'action' => 'sent',
+                'context' => json_encode(['count' => $affected]),
+                'created_at' => now('UTC'),
             ]);
         }
 
-        return response()->json(['ok'=>true,'sent_items'=>$affected]);
+        return response()->json(['ok' => true, 'sent_items' => $affected]);
     }
 
     public function show(Order $order)
@@ -79,8 +113,8 @@ class OrderController extends Controller
 
     private function recalc(int $orderId): void
     {
-        $sum = OrderItem::where('order_id',$orderId)
+        $sum = OrderItem::where('order_id', $orderId)
             ->selectRaw('SUM(price_snapshot * quantity) as s')->value('s') ?? 0;
-        Order::where('id',$orderId)->update(['subtotal'=>$sum,'total'=>$sum]);
+        Order::where('id', $orderId)->update(['subtotal' => $sum, 'total' => $sum]);
     }
 }
