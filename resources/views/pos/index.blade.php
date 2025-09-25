@@ -118,7 +118,22 @@
             gap: 10px;
         }
 
+        /* stepper alinhado ao centro */
+        .card .controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: nowrap;
+        }
+
+        .card .controls input {
+            width: 64px;
+        }
+
         .card {
+            align-items: center;
+            text-align: center;
             background: var(--card);
             border: 1px solid #1f2937;
             border-radius: 12px;
