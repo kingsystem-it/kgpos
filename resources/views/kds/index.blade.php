@@ -37,6 +37,7 @@
     <button class="btn" onclick="toggleFullscreen()">Tela cheia</button>
     <button id="btn-wake" class="btn" onclick="toggleWakeLock()">Manter tela ligada</button>
     <button id="btn-sound" class="btn" onclick="toggleSound()">Som: off</button>
+    <button class="btn" id="btn-test" onclick="testBeep()">Testar som</button>
   </div>
 </header>
 
@@ -56,48 +57,131 @@
 
 <div id="grid" class="content"></div>
 
-<audio id="ding">
-  <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYB...">
-  <!-- som embutido simples; pode substituir por arquivo real -->
-</audio>
-
 <script>
-  let state = { status:'sent', routeId:null, timer:null, prevIds:new Set(), sound:false, wake:null };
+  let state = {
+    status: 'sent',
+    routeId: null,
+    timer: null,
+    prevIds: new Set(),
+    sound: false,
+    wake: null,
+    cache: { sent: [], prepared: [] },
+    pendingBeep: false
+  };
+  let audioCtx = null;
 
-  function setStatus(s){ state.status=s; document.getElementById('tab-sent').classList.toggle('active', s==='sent'); document.getElementById('tab-prepared').classList.toggle('active', s==='prepared'); reloadNow(); }
-  function reloadNow(){ state.routeId=document.getElementById('routeId').value||null; fetchQueue(); }
-
-  async function fetchQueue(){
-    try{
-      const params=new URLSearchParams({status:state.status}); if(state.routeId) params.set('route_id',state.routeId);
-      const res=await fetch('/api/kds/queue?'+params.toString(),{credentials:'same-origin'});
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      const json=await res.json(); render(json.data||[]);
-      document.getElementById('last-upd').textContent=new Date().toLocaleTimeString();
-    }catch(e){ console.error(e); document.getElementById('last-upd').textContent='erro'; }
+  // --------- Áudio ---------
+  async function ensureAudio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      return true;
+    } catch { return false; }
   }
 
-  function render(items){
-    const grid=document.getElementById('grid'); grid.innerHTML='';
-    const sent=items.filter(i=>i.status==='sent'), prep=items.filter(i=>i.status==='prepared');
-    document.getElementById('badge-sent').textContent=sent.length;
-    document.getElementById('badge-prepared').textContent=prep.length;
-
-    // alerta sonoro se chegaram itens novos (em "Enviados")
-    if(state.sound && state.status==='sent'){
-      const newIds = items.map(i=>i.id).filter(id=>!state.prevIds.has(id));
-      if(newIds.length>0){ try{ document.getElementById('ding').play(); }catch{} }
-      state.prevIds = new Set(items.map(i=>i.id));
+  async function playAlert() {
+    try {
+      const ok = await ensureAudio();
+      if (!ok) throw new Error('no-audio');
+      const ctx = audioCtx, now = ctx.currentTime;
+      const beeps = [{f:880,t:0},{f:1046,t:.25},{f:1318,t:.5}];
+      for (const {f,t} of beeps){
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'square';
+        o.frequency.setValueAtTime(f, now+t);
+        g.gain.setValueAtTime(0.0001, now+t);
+        g.gain.exponentialRampToValueAtTime(0.95, now+t+0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, now+t+0.24);
+        o.connect(g).connect(ctx.destination);
+        o.start(now+t); o.stop(now+t+0.26);
+      }
+      if (navigator.vibrate) navigator.vibrate([70,70,70]);
+      return true;
+    } catch (e) {
+      console.warn('Audio error', e);
+      return false;
     }
+  }
 
-    if(items.length===0){ grid.innerHTML='<div class="muted">Sem itens na fila…</div>'; return; }
+  function testBeep(){ playAlert(); }
 
-    for(const it of items){
-      const card=document.createElement('div'); card.className='card';
+  async function toggleSound(){
+    state.sound = !state.sound;
+    document.getElementById('btn-sound').textContent = 'Som: ' + (state.sound ? 'on' : 'off');
+    if (state.sound) { await playAlert(); } // beep de teste ao ligar
+  }
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+      if (audioCtx && audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch {} }
+      if (state.sound && state.pendingBeep) { state.pendingBeep = false; playAlert(); }
+      fetchQueue(); // atualiza a fila ao voltar o foco
+    }
+  });
+
+  // --------- UI base ---------
+  function setStatus(s){
+    state.status = s;
+    document.getElementById('tab-sent').classList.toggle('active', s==='sent');
+    document.getElementById('tab-prepared').classList.toggle('active', s==='prepared');
+    render(state.cache[s] || []);
+    reloadNow();
+  }
+  function reloadNow(){ state.routeId = document.getElementById('routeId').value || null; fetchQueue(); }
+
+  // --------- Dados (busca as duas filas) ---------
+  async function fetchQueue(){
+    try{
+      const mkParams = (s)=>{
+        const p = new URLSearchParams({status:s});
+        if (state.routeId) p.set('route_id', state.routeId);
+        return p.toString();
+      };
+
+      const [rSent, rPrep] = await Promise.all([
+        fetch('/api/kds/queue?'+mkParams('sent'),     {credentials:'same-origin'}),
+        fetch('/api/kds/queue?'+mkParams('prepared'), {credentials:'same-origin'}),
+      ]);
+      if(!rSent.ok || !rPrep.ok) throw new Error('HTTP '+rSent.status+'/'+rPrep.status);
+
+      const sent = (await rSent.json()).data || [];
+      const prepared = (await rPrep.json()).data || [];
+
+      // badges
+      document.getElementById('badge-sent').textContent = sent.length;
+      document.getElementById('badge-prepared').textContent = prepared.length;
+
+      // som quando chegam itens novos em "Enviados"
+      if (state.sound) {
+        const newIds = sent.map(i=>i.id).filter(id=>!state.prevIds.has(id));
+        if (newIds.length > 0) {
+          const ok = await playAlert();
+          if (!ok) state.pendingBeep = true;
+        }
+        state.prevIds = new Set(sent.map(i=>i.id));
+      }
+
+      // cache + render do tab ativo
+      state.cache.sent = sent;
+      state.cache.prepared = prepared;
+      render(state.cache[state.status]);
+
+      document.getElementById('last-upd').textContent = new Date().toLocaleTimeString();
+    }catch(e){
+      console.error(e);
+      document.getElementById('last-upd').textContent = 'erro';
+    }
+  }
+
+  // --------- Render ---------
+  function render(items){
+    const grid = document.getElementById('grid'); grid.innerHTML='';
+    if (items.length===0){ grid.innerHTML='<div class="muted">Sem itens na fila…</div>'; return; }
+    for (const it of items){
+      const card = document.createElement('div'); card.className='card';
       const when = it.status==='prepared' ? it.prepared_at : it.sent_at;
       const since = when ? timeSince(when) : '';
-
-      card.innerHTML=`
+      card.innerHTML = `
         <div class="row">
           <div class="name">${escapeHtml(it.name)}</div>
           <div class="qty">x ${Number(it.quantity)}</div>
@@ -116,28 +200,47 @@
             ${it.status==='sent' ? `<button class="btn warn" onclick="markPrepared(${it.id})">Preparar</button>` : ''}
             ${['sent','prepared'].includes(it.status) ? `<button class="btn ok" onclick="markServed(${it.id})">Servir</button>` : ''}
           </div>
-        </div>`;
+        </div>
+      `;
       grid.appendChild(card);
     }
   }
 
-  async function markPrepared(id){ if(!confirm('Marcar item #'+id+' como PREPARADO?')) return; const r=await fetch('/api/kds/items/'+id+'/prepared',{method:'POST',credentials:'same-origin'}); if(r.ok) fetchQueue(); }
-  async function markServed(id){ if(!confirm('Marcar item #'+id+' como SERVIDO?')) return; const r=await fetch('/api/kds/items/'+id+'/served',{method:'POST',credentials:'same-origin'}); if(r.ok) fetchQueue(); }
+  // --------- Ações ---------
+  async function markPrepared(id){
+    if(!confirm('Marcar item #'+id+' como PREPARADO?')) return;
+    const r = await fetch('/api/kds/items/'+id+'/prepared', {method:'POST', credentials:'same-origin'});
+    if (r.ok) fetchQueue();
+  }
+  async function markServed(id){
+    if(!confirm('Marcar item #'+id+' como SERVIDO?')) return;
+    const r = await fetch('/api/kds/items/'+id+'/served', {method:'POST', credentials:'same-origin'});
+    if (r.ok) fetchQueue();
+  }
 
+  // --------- Utils ---------
   function timeSince(ts){ const d=new Date(ts); const s=Math.max(0,Math.floor((Date.now()-d.getTime())/1000)); if(s<60)return s+'s'; const m=Math.floor(s/60); const rem=s%60; return m+'m '+rem+'s'; }
   function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
 
-  function toggleSound(){ state.sound=!state.sound; document.getElementById('btn-sound').textContent='Som: '+(state.sound?'on':'off'); }
   async function toggleWakeLock(){
-    const btn=document.getElementById('btn-wake');
+    const btn = document.getElementById('btn-wake');
     try{
-      if(!state.wake){ state.wake = await navigator.wakeLock.request('screen'); state.wake.addEventListener('release',()=>{ state.wake=null; btn.textContent='Manter tela ligada'; }); btn.textContent='Mantendo ligada'; }
-      else { await state.wake.release(); state.wake=null; btn.textContent='Manter tela ligada'; }
+      if (!('wakeLock' in navigator)) throw new Error('no-wakelock');
+      if (!state.wake) {
+        state.wake = await navigator.wakeLock.request('screen');
+        state.wake.addEventListener('release', ()=>{ state.wake=null; btn.textContent='Manter tela ligada'; });
+        btn.textContent='Mantendo tela ligada';
+      } else {
+        await state.wake.release();
+        state.wake=null; btn.textContent='Manter tela ligada';
+      }
     }catch{ alert('Wake Lock não suportado neste navegador.'); }
   }
+
   function toggleFullscreen(){ if(!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{}); else document.exitFullscreen(); }
 
-  function startPolling(){ if(state.timer) clearInterval(state.timer); state.timer=setInterval(fetchQueue,3000); }
+  function startPolling(){ if(state.timer) clearInterval(state.timer); state.timer = setInterval(fetchQueue, 3000); }
+
   // init
   fetchQueue(); startPolling();
 </script>
