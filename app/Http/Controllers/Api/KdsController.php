@@ -8,36 +8,51 @@ use Illuminate\Support\Facades\DB;
 
 class KdsController extends Controller
 {
-    public function queue(Request $req)
+   public function queue(Request $req)
 {
     $req->validate([
         'route_id' => 'nullable|integer',
-        'status'   => 'nullable|in:sent,prepared'
+        'status'   => 'nullable|in:sent,prepared',
     ]);
-    $status = $req->get('status','sent');
 
-    $q = \App\Models\OrderItem::query()
-        ->join('orders','orders.id','=','order_items.order_id')
-        ->select([
-            'order_items.id',
-            'order_items.order_id',
-            'orders.anchor as anchor',
-            'order_items.name_snapshot as name',
-            'order_items.quantity',
-            'order_items.status',
-            'order_items.sent_at',
-            'order_items.prepared_at',
-            'order_items.route_id_snapshot as route_id',
-        ])
-        ->whereNull('order_items.served_at')
-        ->whereIn('order_items.status', ['sent','prepared']);
+    $status  = $req->get('status', 'sent');  // 'sent' | 'prepared'
+    $routeId = $req->filled('route_id') ? (int) $req->input('route_id') : null;
 
-    if ($rid = $req->integer('route_id')) $q->where('order_items.route_id_snapshot',$rid);
-    $q->where('order_items.status',$status)
-      ->orderBy($status==='prepared' ? 'order_items.prepared_at' : 'order_items.sent_at');
+    $q = DB::table('order_items as oi')
+        ->join('orders as o', 'o.id', '=', 'oi.order_id')
+        ->selectRaw("
+            oi.id,
+            oi.order_id,
+            o.anchor,
+            oi.name_snapshot as name,
+            oi.quantity,
+            oi.status,
+            oi.sent_at,
+            oi.prepared_at,
+            oi.route_id_snapshot as route_id
+        ")
+        ->whereNull('oi.served_at')
+        ->whereIn('oi.status', ['sent','prepared'])
+        ->where('oi.status', $status);
 
-    return response()->json(['data'=>$q->get()]);
+    if (!is_null($routeId)) {
+        $q->where('oi.route_id_snapshot', $routeId);
+    }
+
+    // ordenação estável mesmo se timestamps estiverem NULL
+    if ($status === 'prepared') {
+        $q->orderByRaw('COALESCE(oi.prepared_at, oi.sent_at, oi.created_at) ASC');
+    } else {
+        $q->orderByRaw('COALESCE(oi.sent_at, oi.created_at) ASC');
+    }
+
+    $data = $q->get();
+
+    return response()
+        ->json(['data' => $data])
+        ->header('Cache-Control', 'no-store, max-age=0');
 }
+
 
     public function markPrepared(Request $req, OrderItem $item)
     {
