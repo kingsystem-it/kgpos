@@ -117,4 +117,27 @@ class OrderController extends Controller
             ->selectRaw('SUM(price_snapshot * quantity) as s')->value('s') ?? 0;
         Order::where('id', $orderId)->update(['subtotal' => $sum, 'total' => $sum]);
     }
+    public function open(\Illuminate\Http\Request $req)
+    {
+        $limit = max(1, min((int)$req->query('limit', 30), 100));
+
+        $rows = DB::table('orders as o')
+            ->leftJoin('order_items as oi', 'oi.order_id', '=', 'o.id')
+            ->whereNull('o.closed_at')
+            ->whereNull('o.canceled_at')
+            ->selectRaw("
+            o.id,
+            o.anchor,
+            o.created_at,
+            COALESCE(o.total, 0) as total,
+            SUM(CASE WHEN oi.status = 'draft' THEN 1 ELSE 0 END) as drafts,
+            SUM(CASE WHEN oi.status = 'sent'  THEN 1 ELSE 0 END) as sents
+        ")
+            ->groupBy('o.id', 'o.anchor', 'o.created_at', 'o.total')
+            ->orderByDesc('o.created_at')
+            ->limit($limit)
+            ->get();
+
+        return response()->json(['data' => $rows]);
+    }
 }
